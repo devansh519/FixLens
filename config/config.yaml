@@ -1,0 +1,23 @@
+project:
+  name: FixLens
+  version: "0.1.0"
+  description: "Agentic RAG system for evidence-backed GitHub bug-fix verification"
+
+github:
+  api_url: "https://api.github.com"
+  timeout_seconds: 30
+  max_retries: 3
+  requests_per_hour: 5000
+
+ingestion:
+  include_closed_issues: true
+  include_pull_requests: true
+  include_comments: true
+  include_timelines: true
+  include_releases: true
+  include_tags: true
+
+storage:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  metadata_dir: "storage/metadata"

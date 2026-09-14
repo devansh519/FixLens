@@ -1,0 +1,63 @@
+# Python environments and tooling
+.venv/
+venv/
+env/
+ENV/
+.uv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python packaging and test reports
+build/
+dist/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pytest.xml
+
+# Jupyter runtime files
+.ipynb_checkpoints/
+
+# Raw and generated application data
+data/raw/
+data/processed/
+data/eval/
+storage/vectorstores/
+storage/metadata/
+experiments/*/results/
+experiments/*/outputs/
+
+# Logs and local databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local secrets and certificates
+*.pem
+*.key
+*.crt
