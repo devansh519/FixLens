@@ -9,7 +9,10 @@ dependencies = [
     "pydantic>=2.13.5",
     "python-dotenv>=1.2.3",
     "pyyaml>=6.0.3",
+    "qdrant-client>=1.19.0",
     "sentence-transformers>=6.0.1",
+    "langgraph==1.0.2",
+    "langchain-groq==1.1.0",
 ]
 
 [dependency-groups]
@@ -21,3 +24,6 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: tests requiring a running Qdrant instance",
+]
