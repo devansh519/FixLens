@@ -43,7 +43,7 @@ class Critic:
     ) -> None:
         self.llm = llm
         self.model = model or os.getenv(
-            "FIXLENS_CRITIC_MODEL", "llama-3.3-70b-versatile"
+            "FIXLENS_CRITIC_MODEL", "openai/gpt-oss-120b"
         )
         self.temperature = temperature
 
@@ -103,10 +103,43 @@ class Critic:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
 
+        def _compact(value: Any, max_chars: int = 1600) -> str:
+            try:
+                rendered = json.dumps(value, default=str, ensure_ascii=False)
+            except Exception:
+                rendered = str(value)
+            return rendered if len(rendered) <= max_chars else rendered[:max_chars] + "...[truncated]"
+
+        compact_evidence = []
+        for item in list(evidence)[-4:]:
+            if isinstance(item, dict):
+                compact_evidence.append({
+                    "action": item.get("action"),
+                    "parameters": item.get("parameters", {}),
+                    "success": item.get("success", False),
+                    "result": _compact(item.get("result")),
+                    "error": _compact(item.get("error"), 400),
+                })
+            else:
+                compact_evidence.append(_compact(item))
+
+        raw_plan = plan or {}
+        compact_plan = {
+            "goal": raw_plan.get("goal", "") if isinstance(raw_plan, dict) else "",
+            "requires_verification": (
+                raw_plan.get("requires_verification", True)
+                if isinstance(raw_plan, dict) else True
+            ),
+            "steps": (
+                list(raw_plan.get("steps", []))[-3:]
+                if isinstance(raw_plan, dict) else []
+            ),
+        }
+
         payload = {
             "query": query.strip(),
-            "plan": plan or {},
-            "evidence": evidence,
+            "plan": compact_plan,
+            "evidence": compact_evidence,
             "output_schema": {
                 "status": "sufficient or insufficient",
                 "reason": "why",

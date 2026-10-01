@@ -62,7 +62,7 @@ class Planner:
     ) -> None:
         self.llm = llm
         self.model = model or os.getenv(
-            "FIXLENS_PLANNER_MODEL", "llama-3.3-70b-versatile"
+            "FIXLENS_PLANNER_MODEL", "openai/gpt-oss-120b"
         )
         self.temperature = temperature
 
@@ -118,13 +118,60 @@ class Planner:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
 
+        state = state or {}
+
+        def _compact(value: Any, max_chars: int = 1400) -> str:
+            try:
+                rendered = json.dumps(value, default=str, ensure_ascii=False)
+            except Exception:
+                rendered = str(value)
+            return rendered if len(rendered) <= max_chars else rendered[:max_chars] + "...[truncated]"
+
+        compact_results = []
+        for item in state.get("tool_results", [])[-4:]:
+            compact_results.append({
+                "action": item.get("action"),
+                "parameters": item.get("parameters", {}),
+                "success": item.get("success", False),
+                "result": _compact(item.get("result")),
+                "error": _compact(item.get("error"), 400),
+            })
+
+        compact_evidence = []
+        for item in state.get("evidence", [])[-4:]:
+            compact_evidence.append({
+                "action": item.get("action"),
+                "parameters": item.get("parameters", {}),
+                "result": _compact(item.get("result")),
+            })
+
+        critic = state.get("critic", {})
+        compact_critic = {
+            "status": critic.get("status") if isinstance(critic, dict) else None,
+            "reason": _compact(critic.get("reason"), 700) if isinstance(critic, dict) else "",
+            "missing_evidence": list(critic.get("missing_evidence", []))[:6] if isinstance(critic, dict) else [],
+            "suggested_actions": list(critic.get("suggested_actions", []))[:3] if isinstance(critic, dict) else [],
+        }
+
         payload = {
             "query": query.strip(),
-            "current_state": state or {},
+            # Preserve the exact public state contract for existing callers/tests.
+            "current_state": state,
+            # LLM-facing bounded context. This is what prevents TPM blow-ups.
+            "planning_context": {
+                "iterations": state.get("iterations", 0),
+                "evidence": compact_evidence,
+                "recent_tool_results": compact_results,
+                "critic": compact_critic,
+            },
             "output_schema": {
                 "goal": "verification goal",
                 "steps": [
-                    {"action": "allowed action", "reason": "why", "parameters": {}}
+                    {
+                        "action": "allowed action",
+                        "reason": "why this is the smallest useful next action",
+                        "parameters": "parameters matching the exact action schema",
+                    }
                 ],
                 "requires_verification": True,
             },
