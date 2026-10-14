@@ -35,8 +35,12 @@ pytest.xml
 data/raw/
 data/processed/
 data/eval/
+!data/eval/
+!data/eval/*.jsonl
 storage/vectorstores/
 storage/metadata/
+evaluation/results/*
+!evaluation/results/baseline-v1.0.0.jsonl
 experiments/*/results/
 experiments/*/outputs/
 

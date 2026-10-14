@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from src.ingestion.resolve_links import repository_from_url
 
 ISSUES_DIR = Path("data/raw/issues")
 COMMENTS_DIR = Path("data/raw/comments")
@@ -54,16 +55,18 @@ def build_metadata() -> int:
     prs = load_json_pages(PRS_DIR)
     mappings = load_version_mappings()
 
-    issues_by_number = {
-        issue["number"]: issue
+    issues_by_identity = {
+        (repository, issue["number"]): issue
         for issue in issues
         if "number" in issue
+        and (repository := repository_from_url(issue.get("html_url"))) is not None
     }
 
-    prs_by_number = {
-        pr["number"]: pr
+    prs_by_identity = {
+        (repository, pr["number"]): pr
         for pr in prs
         if "number" in pr
+        and (repository := repository_from_url(pr.get("html_url"))) is not None
     }
 
     metadata_records = []
@@ -71,16 +74,28 @@ def build_metadata() -> int:
     for mapping in mappings:
         issue_number = mapping.get("issue_number")
         pr_number = mapping.get("pr_number")
+        repository = mapping.get("repository")
+        if isinstance(repository, str) and "/" in repository:
+            owner, repo = repository.split("/", 1)
+            repository_key = (owner.casefold(), repo.casefold())
+        else:
+            repository_key = repository_from_url(mapping.get("pr_url"))
+        if repository_key is None:
+            continue
 
-        issue = issues_by_number.get(issue_number, {})
-        pr = prs_by_number.get(pr_number, {})
+        issue = issues_by_identity.get((repository_key, issue_number), {})
+        pr = prs_by_identity.get((repository_key, pr_number), {})
+        if not issue or not pr:
+            continue
 
         record = {
+            "repository": "/".join(repository_key),
             "issue": {
                 "number": issue_number,
                 "title": issue.get("title"),
                 "body": issue.get("body"),
                 "state": issue.get("state"),
+                "state_reason": issue.get("state_reason"),
                 "url": issue.get("html_url"),
                 "comments": load_comments(issue_number),
             },

@@ -59,6 +59,7 @@ class FakeMetadata:
             "pull_request": {
                 "number": pr_number,
                 "state": "closed",
+                "body": "Fixes #11151",
                 "merged_at": "2021-12-24T13:11:06Z",
                 "merge_commit_sha": "e14e123",
                 "url": f"https://github.com/pydantic/pydantic/pull/{pr_number}",

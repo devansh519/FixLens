@@ -2,6 +2,7 @@ import json
 import re
 from pathlib import Path
 
+from src.ingestion.resolve_links import repository_from_url
 
 MAPPINGS_PATH = Path("data/processed/mappings.jsonl")
 RELEASES_DIR = Path("data/raw/releases")
@@ -9,8 +10,16 @@ OUTPUT_PATH = Path("data/processed/version_mappings.jsonl")
 
 
 PR_PATTERN = re.compile(
-    r"(?:pull/|#)(\d+)",
+    r"(?<![\w/])#(\d+)\b",
     re.IGNORECASE,
+)
+PR_URL_PATTERN = re.compile(
+    r"https?://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)"
+    r"/pull/(?P<number>\d+)\b",
+    re.IGNORECASE,
+)
+QUALIFIED_PR_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w/])(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#(?P<number>\d+)\b"
 )
 
 
@@ -40,39 +49,75 @@ def extract_pr_numbers(release: dict) -> set[int]:
         ]
     )
 
-    return {
-        int(match)
-        for match in PR_PATTERN.findall(text)
+    repository = repository_from_url(release.get("html_url"))
+    if repository is None:
+        return set()
+
+    numbers = {
+        int(match.group("number"))
+        for match in PR_URL_PATTERN.finditer(text)
+        if (
+            match.group("owner").casefold(),
+            match.group("repo").casefold(),
+        ) == repository
     }
+
+    def collect_qualified(match: re.Match[str]) -> str:
+        linked_repository = (
+            match.group("owner").casefold(),
+            match.group("repo").casefold(),
+        )
+        if linked_repository == repository:
+            numbers.add(int(match.group("number")))
+        return " "
+
+    text = PR_URL_PATTERN.sub(" ", text)
+    text = QUALIFIED_PR_REFERENCE_PATTERN.sub(collect_qualified, text)
+    numbers.update(int(number) for number in PR_PATTERN.findall(text))
+    return numbers
+
+
+def resolve_release_mappings(
+    mappings: list[dict],
+    releases: list[dict],
+) -> list[dict]:
+    """Join release PR references by repository and PR number."""
+    release_by_pr: dict[tuple[tuple[str, str], int], dict] = {}
+    for release in releases:
+        repository = repository_from_url(release.get("html_url"))
+        if repository is None:
+            continue
+        for pr_number in extract_pr_numbers(release):
+            release_by_pr[(repository, pr_number)] = release
+
+    resolved = []
+    for mapping in mappings:
+        repository = mapping.get("repository")
+        if isinstance(repository, str) and "/" in repository:
+            owner, repo = repository.split("/", 1)
+            repository_key = (owner.casefold(), repo.casefold())
+        else:
+            repository_key = repository_from_url(mapping.get("pr_url"))
+        pr_number = mapping.get("pr_number")
+        release = (
+            release_by_pr.get((repository_key, pr_number))
+            if repository_key is not None and isinstance(pr_number, int)
+            else None
+        )
+        resolved.append({
+            **mapping,
+            "version_info": {
+                "release": release,
+                "tag_name": release.get("tag_name") if release else None,
+            },
+        })
+    return resolved
 
 
 def resolve_versions() -> None:
     mappings = load_jsonl(MAPPINGS_PATH)
     releases = load_releases()
-
-    release_by_pr: dict[int, dict] = {}
-
-    for release in releases:
-        for pr_number in extract_pr_numbers(release):
-            release_by_pr[pr_number] = release
-
-    resolved = []
-
-    for mapping in mappings:
-        pr_number = mapping.get("pr_number")
-        release = release_by_pr.get(pr_number)
-
-        version_info = {
-            "release": release,
-            "tag_name": release.get("tag_name") if release else None,
-        }
-
-        resolved_mapping = {
-            **mapping,
-            "version_info": version_info,
-        }
-
-        resolved.append(resolved_mapping)
+    resolved = resolve_release_mappings(mappings, releases)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
 from src.agents.critic import Critic
 from src.agents.planner import Planner
 from src.pipeline.graph import build_fixlens_graph
+from src.pipeline.state import initial_state
 from src.pipeline.tool_registry import build_real_tool_registry
 from src.verification.verifier import VerificationEngine
-
 
 REAL_ISSUE_NUMBER = int(os.getenv("FIXLENS_REAL_ISSUE_NUMBER", "11151"))
 
@@ -47,30 +48,116 @@ def test_real_pydantic_issue_e2e():
         max_iterations=8,
     )
 
-    result = graph.invoke(query)
+    result = initial_state(query)
+    for event in graph.stream(query):
+        for node, update in event.items():
+            previous_tool_count = len(result.get("tool_results", []))
+            previous_evidence_count = len(result.get("evidence", []))
+            result.update(update)
 
-    print("\n\n=== FINAL PLAN ===")
-    print(result.get("plan"))
-
-    print("\n=== TOOL RESULTS ===")
-    for i, observation in enumerate(result.get("tool_results", []), 1):
-        print(f"\n--- TOOL {i} ---")
-        print(observation)
-
-    print("\n=== EVIDENCE ===")
-    print(result.get("evidence"))
-
-    print("\n=== CRITIC ===")
-    print(result.get("critic"))
-
-    print("\n=== VERIFICATION ===")
-    print(result.get("verification"))
+            if node == "planner":
+                actions = [
+                    step.get("action")
+                    for step in result.get("plan", {}).get("steps", [])
+                ]
+                print(
+                    f"TRACE node=planner iteration={result.get('iterations')} "
+                    f"actions={actions}",
+                    flush=True,
+                )
+            elif node == "router":
+                for observation in result.get("tool_results", [])[previous_tool_count:]:
+                    error = observation.get("error", "")
+                    error_type = (
+                        error.split(":", 1)[0]
+                        if isinstance(error, str) and error
+                        else None
+                    )
+                    error_detail = error_type
+                    if isinstance(error, str):
+                        argument_error = re.search(
+                            r"(?:unexpected keyword argument|missing required "
+                            r"positional argument) ['\"]([^'\"]+)['\"]",
+                            error,
+                        )
+                        if argument_error:
+                            error_detail = (
+                                f"{error_type}({argument_error.group(1)})"
+                            )
+                        elif "invalid literal for int()" in error:
+                            error_detail = "ValueError(invalid_identifier)"
+                    print(
+                        "TRACE node=router "
+                        f"iteration={result.get('iterations')} "
+                        f"action={observation.get('action')} "
+                        f"success={observation.get('success')} "
+                        f"parameter_names={sorted(observation.get('parameters', {}).keys())} "
+                        f"error={error_detail}",
+                        flush=True,
+                    )
+                if result.get("no_progress"):
+                    print(
+                        "TRACE node=router no new tool action executed",
+                        flush=True,
+                    )
+            elif node == "sync_evidence":
+                added = result.get("evidence", [])[previous_evidence_count:]
+                print(
+                    "TRACE node=sync_evidence "
+                    f"added={[item.get('action') for item in added]} "
+                    f"total={len(result.get('evidence', []))} "
+                    f"next={'verifier (no progress)' if result.get('no_progress') else 'critic'}",
+                    flush=True,
+                )
+            elif node == "critic":
+                decision = result.get("critic", {})
+                if decision.get("status") == "sufficient":
+                    next_node = "verifier"
+                elif not decision.get("suggested_actions"):
+                    next_node = "verifier (no actions available)"
+                elif result.get("no_progress"):
+                    next_node = "verifier (no progress)"
+                elif result.get("iterations", 0) >= graph.max_iterations:
+                    next_node = "verifier (iteration limit)"
+                else:
+                    next_node = "planner"
+                print(
+                    "TRACE node=critic "
+                    f"iteration={result.get('iterations')} "
+                    f"decision={decision.get('status')} "
+                    "suggested_actions="
+                    f"{[item.get('action') for item in decision.get('suggested_actions', [])]} "
+                    f"next={next_node}",
+                    flush=True,
+                )
+            elif node == "verifier":
+                verification = result.get("verification", {})
+                print(
+                    "TRACE node=verifier "
+                    f"status={verification.get('status')} "
+                    f"issue_verified={verification.get('issue_verified')} "
+                    f"pr_verified={verification.get('pr_verified')} "
+                    f"issue_pr_relation_verified={verification.get('issue_pr_relation_verified')} "
+                    f"pr_merged={verification.get('pr_merged')} "
+                    f"commit_verified={verification.get('commit_verified')} "
+                    f"release_verified={verification.get('release_verified')}",
+                    flush=True,
+                )
+            elif node == "answer":
+                print("TRACE node=answer terminal=true", flush=True)
 
     assert result["status"] == "completed"
     assert result["final_answer"].strip()
 
     assert result["plan"]
     assert result["plan"].get("steps")
+    critic = result.get("critic", {})
+    assert "suggested_actions" in critic
+    if critic.get("suggested_actions"):
+        for action in critic["suggested_actions"]:
+            assert isinstance(action, dict)
+            assert "action" in action
+            assert "parameters" in action
 
     tool_results = result.get("tool_results", [])
     assert tool_results
@@ -95,43 +182,16 @@ def test_real_pydantic_issue_e2e():
         "NOT_VERIFIED",
         "INSUFFICIENT_EVIDENCE",
     }
+    if verification.get("status") == "FIXED":
+        assert verification.get("issue_pr_relation_verified") is True
     assert verification.get("reason")
 
-    print("\n=== FixLens REAL E2E RESULT ===")
-    print(f"Query: {query}")
-    print(f"Iterations: {result.get('iterations')}")
-    print(f"Planner steps: {len(result['plan'].get('steps', []))}")
-    print(f"Tool observations: {len(tool_results)}")
-    print(f"Successful observations: {len(successful_tools)}")
-    print(f"Evidence items: {len(evidence)}")
-    print(f"Critic: {critic.get('status')} — {critic.get('reason')}")
     print(
-        "Verification: "
-        f"{verification.get('status')} — {verification.get('reason')}"
+        "\n=== FixLens REAL E2E RESULT === "
+        f"iterations={result.get('iterations')} "
+        f"tool_observations={len(tool_results)} "
+        f"successful_tools={len(successful_tools)} "
+        f"evidence_items={len(evidence)} "
+        f"critic={critic.get('status')} "
+        f"verification={verification.get('status')}"
     )
-
-    timings = result.get("timings", {})
-    print("\n=== FixLens TIMING BREAKDOWN ===")
-    for phase in (
-        "planner",
-        "router",
-        "sync_evidence",
-        "critic",
-        "verification",
-        "answer",
-        "total",
-    ):
-        if phase in timings:
-            print(f"{phase:<18} {timings[phase]:>9.3f}s")
-
-    tool_timings = result.get("tool_timings", [])
-    if tool_timings:
-        print("\n=== TOOL TIMINGS ===")
-        for item in tool_timings:
-            print(
-                f"iter={item['iteration']:<2} "
-                f"{item['action']:<20} "
-                f"{item['elapsed_seconds']:>9.3f}s"
-            )
-
-    print(f"\nFinal answer: {result['final_answer']}")

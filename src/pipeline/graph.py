@@ -9,7 +9,8 @@ factual result.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from .router import ToolRouter
@@ -35,6 +36,7 @@ class FixLensGraph:
         self.verifier = verifier
         self.answer_builder = answer_builder or self._default_answer
         self.max_iterations = max_iterations
+        self.recursion_limit = 4 * max_iterations + 2
         self._compiled = self._build_graph()
 
     @staticmethod
@@ -69,12 +71,15 @@ class FixLensGraph:
         # Successful observations are preserved verbatim. No interpretation is
         # performed here.
         evidence = list(state.get("evidence", []))
-        start = len(evidence)
         observations = state.get("tool_results", [])
-        for observation in observations[start:]:
+        cursor = state.get("evidence_cursor", 0)
+        for observation in observations[cursor:]:
             if observation.get("success"):
                 evidence.append(observation)
-        return {"evidence": evidence}
+        return {
+            "evidence": evidence,
+            "evidence_cursor": len(observations),
+        }
 
     def _verify_node(self, state: FixLensState) -> dict[str, Any]:
         evidence = list(state.get("evidence", []))
@@ -112,10 +117,23 @@ class FixLensGraph:
         graph.add_edge(START, "planner")
         graph.add_edge("planner", "router")
         graph.add_edge("router", "sync_evidence")
-        graph.add_edge("sync_evidence", "critic")
+
+        def after_sync_evidence(state: FixLensState) -> str:
+            return "verifier" if state.get("no_progress", False) else "critic"
+
+        graph.add_conditional_edges(
+            "sync_evidence",
+            after_sync_evidence,
+            {"critic": "critic", "verifier": "verifier"},
+        )
 
         def after_critic(state: FixLensState) -> str:
-            if state.get("critic", {}).get("status") == "sufficient":
+            decision = state.get("critic", {})
+            if decision.get("status") == "sufficient":
+                return "verifier"
+            if not decision.get("suggested_actions"):
+                return "verifier"
+            if state.get("no_progress", False):
                 return "verifier"
             if state.get("iterations", 0) >= self.max_iterations:
                 return "verifier"
@@ -138,6 +156,13 @@ class FixLensGraph:
             steps = plan.get("steps", [])
             results = list(state.get("tool_results", []))
             index = state.get("current_step", 0)
+            attempted = {
+                self._action_signature(
+                    item.get("action"), item.get("parameters", {})
+                )
+                for item in results
+            }
+            executed = 0
 
             while index < len(steps):
                 step = steps[index]
@@ -147,27 +172,55 @@ class FixLensGraph:
                 if action == "finish":
                     index += 1
                     break
+                parameters = step.get("parameters", {})
+                signature = self._action_signature(action, parameters)
+                if signature in attempted:
+                    index += 1
+                    continue
                 observation = self.router.execute(
                     action,
-                    step.get("parameters", {}),
+                    parameters,
                 )
                 results.append(observation)
+                attempted.add(signature)
+                executed += 1
                 index += 1
 
             return {
                 "tool_results": results,
                 "current_step": index,
+                "no_progress": executed == 0,
                 "status": "plan_executed",
             }
 
         return _node
+
+    @staticmethod
+    def _action_signature(action: Any, parameters: Any) -> str:
+        return json.dumps(
+            [action, parameters],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
 
     @property
     def compiled(self):
         return self._compiled
 
     def invoke(self, query: str) -> FixLensState:
-        return self._compiled.invoke(initial_state(query))
+        return self._compiled.invoke(
+            initial_state(query),
+            config={"recursion_limit": self.recursion_limit},
+        )
+
+    def stream(self, query: str) -> Iterator[dict[str, Any]]:
+        """Stream node updates while honoring the graph's bounded iteration limit."""
+        return self._compiled.stream(
+            initial_state(query),
+            config={"recursion_limit": self.recursion_limit},
+            stream_mode="updates",
+        )
 
     @staticmethod
     def _default_answer(state: FixLensState) -> str:

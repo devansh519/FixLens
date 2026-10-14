@@ -8,7 +8,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 ActionType = Literal[
     "lookup_issue", "lookup_pr", "lookup_commit", "lookup_release",
     "retrieve_issue", "retrieve_release", "verify_version",
@@ -32,14 +31,14 @@ SYSTEM_PROMPT = """You are the planning component of FixLens.
 Decide WHAT should be investigated, never WHAT the factual answer is.
 
 Available actions:
-- lookup_issue: exact issue metadata lookup
-- lookup_pr: exact PR metadata lookup
-- lookup_commit: exact merge-commit lookup
-- lookup_release: exact release/tag lookup
-- retrieve_issue: semantic issue/PR retrieval
-- retrieve_release: semantic release retrieval
-- verify_version: deterministic semantic-version comparison
-- verify_citations: deterministic citation validation
+- lookup_issue: exact issue metadata lookup by issue_number; optional owner/repo
+- lookup_pr: exact PR metadata lookup by pr_number; optional owner/repo
+- lookup_commit: exact merge-commit lookup by commit_sha; optional owner/repo
+- lookup_release: exact release/tag lookup by release_tag; optional owner/repo
+- retrieve_issue: semantic retrieval by query; optional limit/owner/repo
+- retrieve_release: semantic retrieval by query; optional limit/owner/repo
+- verify_version: compare actual_version and required_version; optional operation
+- verify_citations: validate supplied evidence or citations
 - finish: stop planning when enough evidence exists
 
 Rules:
@@ -49,6 +48,7 @@ Rules:
 4. Version and citation claims must be checked by deterministic tools.
 5. Keep the plan minimal.
 6. The deterministic verifier, not the LLM, decides factual truth.
+7. Use only the parameters listed for the selected action; do not add fields.
 Return JSON only."""
 
 
@@ -109,7 +109,7 @@ class Planner:
         except json.JSONDecodeError as exc:
             raise ValueError("Planner returned invalid JSON.") from exc
         if not isinstance(result, dict):
-            raise ValueError("Planner response must be a JSON object.")
+            raise TypeError("Planner response must be a JSON object.")
         return result
 
     def plan(
@@ -123,7 +123,7 @@ class Planner:
         def _compact(value: Any, max_chars: int = 1400) -> str:
             try:
                 rendered = json.dumps(value, default=str, ensure_ascii=False)
-            except Exception:
+            except (TypeError, ValueError):
                 rendered = str(value)
             return rendered if len(rendered) <= max_chars else rendered[:max_chars] + "...[truncated]"
 
@@ -133,8 +133,8 @@ class Planner:
                 "action": item.get("action"),
                 "parameters": item.get("parameters", {}),
                 "success": item.get("success", False),
-                "result": _compact(item.get("result")),
-                "error": _compact(item.get("error"), 400),
+                "result": _compact(item.get("result"), 700),
+                "error": _compact(item.get("error"), 250),
             })
 
         compact_evidence = []
@@ -142,7 +142,7 @@ class Planner:
             compact_evidence.append({
                 "action": item.get("action"),
                 "parameters": item.get("parameters", {}),
-                "result": _compact(item.get("result")),
+                "result": _compact(item.get("result"), 700),
             })
 
         critic = state.get("critic", {})
@@ -155,9 +155,11 @@ class Planner:
 
         payload = {
             "query": query.strip(),
-            # Preserve the exact public state contract for existing callers/tests.
-            "current_state": state,
-            # LLM-facing bounded context. This is what prevents TPM blow-ups.
+            "current_state": {
+                "iterations": state.get("iterations", 0),
+                "tool_result_count": len(state.get("tool_results", [])),
+                "evidence_count": len(state.get("evidence", [])),
+            },
             "planning_context": {
                 "iterations": state.get("iterations", 0),
                 "evidence": compact_evidence,

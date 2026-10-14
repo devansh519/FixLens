@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from src.embeddings.embedder import QueryEmbedder
 from src.pipeline.router import ToolRouter
@@ -25,6 +26,88 @@ from src.tools.citation_verifier import CitationVerifier
 from src.tools.metadata_lookup import MetadataLookup
 from src.tools.version_verifier import VersionVerifier
 from src.vectorstore.qdrant_client import FixLensQdrantClient
+
+
+def _repository_matches(
+    record: Any,
+    owner: str | None,
+    repo: str | None,
+) -> bool:
+    if not owner and not repo:
+        return True
+
+    if repo and "/" in repo:
+        repo_owner, repo_name = repo.split("/", 1)
+        if owner and owner.casefold() != repo_owner.casefold():
+            return False
+        owner, repo = repo_owner, repo_name
+
+    if isinstance(record, dict):
+        issue = record.get("issue")
+        pull_request = record.get("pull_request")
+        commit = record.get("commit")
+        release = record.get("release")
+        version_info = record.get("version_info")
+        evidence = record.get("evidence")
+        payload = record.get("payload")
+    else:
+        issue = pull_request = commit = release = version_info = evidence = None
+        payload = getattr(record, "payload", None)
+    version_release = (
+        version_info.get("release")
+        if isinstance(version_info, dict)
+        else None
+    )
+    payload_metadata = payload.get("metadata") if isinstance(payload, dict) else None
+    urls = [
+        issue.get("url") if isinstance(issue, dict) else None,
+        pull_request.get("url") if isinstance(pull_request, dict) else None,
+        commit.get("url") if isinstance(commit, dict) else None,
+        release.get("url") if isinstance(release, dict) else None,
+        version_release.get("html_url")
+        if isinstance(version_release, dict)
+        else None,
+        evidence.get("issue_url") if isinstance(evidence, dict) else None,
+        evidence.get("pr_url") if isinstance(evidence, dict) else None,
+        payload_metadata.get("issue_url")
+        if isinstance(payload_metadata, dict)
+        else None,
+        payload_metadata.get("pr_url")
+        if isinstance(payload_metadata, dict)
+        else None,
+    ]
+    for url in urls:
+        if not isinstance(url, str):
+            continue
+        parts = [part for part in urlsplit(url).path.split("/") if part]
+        if parts and parts[0] == "repos":
+            parts = parts[1:]
+        if len(parts) < 2:
+            continue
+        record_owner, record_repo = parts[0], parts[1]
+        if (
+            (not owner or record_owner.casefold() == owner.casefold())
+            and (not repo or record_repo.casefold() == repo.casefold())
+        ):
+            return True
+    return False
+
+
+def _filter_repository(
+    records: Any,
+    owner: str | None,
+    repo: str | None,
+) -> Any:
+    if not owner and not repo:
+        return records
+    if isinstance(records, (list, tuple)):
+        return [
+            record for record in records
+            if _repository_matches(record, owner, repo)
+        ]
+    if isinstance(records, dict):
+        return records if _repository_matches(records, owner, repo) else {}
+    return records
 
 
 class FixLensToolRegistry:
@@ -140,33 +223,42 @@ def build_tool_registry(
     # Metadata lookup tools
     # ---------------------------------------------------------
 
-    registry.register(
-        "lookup_issue",
-        lambda issue_number: metadata.get_by_issue_number(
-            int(issue_number)
-        ),
-    )
+    def lookup_issue(
+        issue_number: int | str,
+        owner: str | None = None,
+        repo: str | None = None,
+    ) -> Any:
+        records = metadata.get_by_issue_number(int(issue_number))
+        return _filter_repository(records, owner, repo)
 
-    registry.register(
-        "lookup_pr",
-        lambda pr_number: metadata.get_by_pr_number(
-            int(pr_number)
-        ),
-    )
+    def lookup_pr(
+        pr_number: int | str,
+        owner: str | None = None,
+        repo: str | None = None,
+    ) -> Any:
+        records = metadata.get_by_pr_number(int(pr_number))
+        return _filter_repository(records, owner, repo)
 
-    registry.register(
-        "lookup_commit",
-        lambda commit_sha: metadata.get_by_commit_sha(
-            str(commit_sha)
-        ),
-    )
+    def lookup_commit(
+        commit_sha: str,
+        owner: str | None = None,
+        repo: str | None = None,
+    ) -> Any:
+        records = metadata.get_by_commit_sha(str(commit_sha))
+        return _filter_repository(records, owner, repo)
 
-    registry.register(
-        "lookup_release",
-        lambda release_tag: metadata.get_by_release_tag(
-            str(release_tag)
-        ),
-    )
+    def lookup_release(
+        release_tag: str,
+        owner: str | None = None,
+        repo: str | None = None,
+    ) -> Any:
+        records = metadata.get_by_release_tag(str(release_tag))
+        return _filter_repository(records, owner, repo)
+
+    registry.register("lookup_issue", lookup_issue)
+    registry.register("lookup_pr", lookup_pr)
+    registry.register("lookup_commit", lookup_commit)
+    registry.register("lookup_release", lookup_release)
 
     # ---------------------------------------------------------
     # Semantic retrieval tools
@@ -175,28 +267,34 @@ def build_tool_registry(
     def retrieve_issue(
         query: str,
         limit: int = retrieval_limit,
+        owner: str | None = None,
+        repo: str | None = None,
     ) -> list[Any]:
         """Retrieve relevant issue/PR records from Qdrant."""
 
         vector = query_embedder.embed_query(query)
 
-        return issue_retriever.retrieve(
+        records = issue_retriever.retrieve(
             vector,
             limit=limit,
         )
+        return _filter_repository(records, owner, repo)
 
     def retrieve_release(
         query: str,
         limit: int = retrieval_limit,
+        owner: str | None = None,
+        repo: str | None = None,
     ) -> list[Any]:
         """Retrieve relevant release records from Qdrant."""
 
         vector = query_embedder.embed_query(query)
 
-        return release_retriever.retrieve(
+        records = release_retriever.retrieve(
             vector,
             limit=limit,
         )
+        return _filter_repository(records, owner, repo)
 
     registry.register(
         "retrieve_issue",

@@ -7,16 +7,36 @@ from src.pipeline.tool_registry import FixLensToolRegistry, build_tool_registry
 
 class FakeMetadataLookup:
     def get_by_issue_number(self, issue_number):
-        return {"issue": {"number": issue_number}}
+        return {
+            "issue": {
+                "number": issue_number,
+                "url": f"https://github.com/pydantic/pydantic/issues/{issue_number}",
+            }
+        }
 
     def get_by_pr_number(self, pr_number):
-        return {"pull_request": {"number": pr_number}}
+        return {
+            "pull_request": {
+                "number": pr_number,
+                "url": f"https://github.com/pydantic/pydantic/pull/{pr_number}",
+            }
+        }
 
     def get_by_commit_sha(self, commit_sha):
-        return {"commit": {"sha": commit_sha}}
+        return {
+            "commit": {
+                "sha": commit_sha,
+                "url": "https://github.com/pydantic/pydantic/pull/3552",
+            }
+        }
 
     def get_by_release_tag(self, release_tag):
-        return {"release": {"tag_name": release_tag}}
+        return {
+            "release": {
+                "tag_name": release_tag,
+                "url": "https://github.com/pydantic/pydantic/releases/tag/v2.0.0",
+            }
+        }
 
 
 class FakeEmbedder:
@@ -95,6 +115,40 @@ def test_registry_builds_router_with_stage4_adapters():
     assert retrieved["result"]["query_vector"] == ["database validation"]
 
     assert version["result"]["valid"] is True
+
+
+def test_metadata_adapters_accept_and_enforce_repository_scope():
+    registry = build_tool_registry(
+        metadata_lookup=FakeMetadataLookup(),
+        issue_retriever=FakeRetriever(),
+        release_retriever=FakeRetriever(),
+        version_verifier=FakeVersionVerifier(),
+        citation_verifier=FakeCitationVerifier(),
+        embedder=FakeEmbedder(),
+    )
+    router = registry.build_router()
+
+    matching = router.execute(
+        "lookup_issue",
+        {
+            "issue_number": 11151,
+            "owner": "pydantic",
+            "repo": "pydantic",
+        },
+    )
+    mismatched = router.execute(
+        "lookup_issue",
+        {
+            "issue_number": 11151,
+            "owner": "another-org",
+            "repo": "pydantic",
+        },
+    )
+
+    assert matching["success"] is True
+    assert matching["result"]["issue"]["number"] == 11151
+    assert mismatched["success"] is True
+    assert mismatched["result"] == {}
 
 
 def test_registry_reports_missing_tools():

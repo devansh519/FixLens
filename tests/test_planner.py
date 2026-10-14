@@ -64,13 +64,53 @@ def test_planner_passes_existing_state_to_llm():
         "requires_verification": True,
     }))
 
-    state = {"tool_results": [{"action": "lookup_issue", "success": True}]}
+    state = {
+        "iterations": 2,
+        "tool_results": [{
+            "action": "lookup_issue",
+            "success": True,
+            "result": {"issue": {"number": 11151}},
+        }],
+        "evidence": [{"action": "lookup_issue", "success": True}],
+    }
     plan = Planner(llm=llm).plan("Was issue #11151 released?", state=state)
 
     assert plan.steps[0].action == "lookup_release"
     human_message = llm.calls[0][1][1]
     payload = json.loads(human_message)
-    assert payload["current_state"] == state
+    assert payload["current_state"] == {
+        "iterations": 2,
+        "tool_result_count": 1,
+        "evidence_count": 1,
+    }
+    assert payload["planning_context"]["recent_tool_results"][0]["result"]
+
+
+def test_planner_bounds_serialized_state_for_large_histories():
+    llm = FakeLLM(json.dumps({
+        "goal": "Verify evidence.",
+        "steps": [],
+        "requires_verification": True,
+    }))
+    large_observation = {
+        "action": "retrieve_issue",
+        "success": True,
+        "parameters": {"query": "issue"},
+        "result": "x" * 20_000,
+    }
+    state = {
+        "iterations": 7,
+        "tool_results": [large_observation] * 30,
+        "evidence": [large_observation] * 30,
+    }
+
+    Planner(llm=llm).plan("Verify the issue.", state=state)
+
+    human_message = llm.calls[0][1][1]
+    assert len(human_message) < 12_000
+    payload = json.loads(human_message)
+    assert payload["current_state"]["tool_result_count"] == 30
+    assert len(payload["planning_context"]["recent_tool_results"]) == 4
 
 
 def test_planner_rejects_empty_query():

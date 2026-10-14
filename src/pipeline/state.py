@@ -12,6 +12,8 @@ class FixLensState(TypedDict, total=False):
     iterations: int
     tool_results: list[dict[str, Any]]
     evidence: list[dict[str, Any]]
+    evidence_cursor: int
+    no_progress: bool
     critic: dict[str, Any]
     verification: dict[str, Any]
     final_answer: str
@@ -29,6 +31,8 @@ def initial_state(query: str) -> FixLensState:
         "iterations": 0,
         "tool_results": [],
         "evidence": [],
+        "evidence_cursor": 0,
+        "no_progress": False,
         "critic": {},
         "verification": {},
         "final_answer": "",
